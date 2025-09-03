@@ -151,8 +151,7 @@ F13-Kr1pt0n — forked the project as an MBP14,3 owner, updating the iBridge and
 
 This project is licensed under the **GPL-2.0** license.
 
-The original driver was written by **Ronald Tschalär** and contributors.
-This fork (MBP14,3 compatibility updates) was created and is maintained by **David Rodriguez**, specifically to restore Touch Bar and keyboard functionality on modern Linux kernels.
+\This fork (MBP14,3 compatibility updates) was created and is maintained by **David Rodriguez**, specifically to restore Touch Bar and keyboard functionality on modern Linux kernels.
 
 See the file headers (`// SPDX-License-Identifier: GPL-2.0`) for details.
 
