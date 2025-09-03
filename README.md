@@ -25,16 +25,6 @@ This fork:
 
 ---
 
-## Kernel compatibility matrix
-
-| Kernel version | Behavior in this fork                                 |
-| -------------- | ----------------------------------------------------- |
-| 4.16 – 6.14    | Legacy mode, same as original driver                  |
-| 6.15 – 6.16    | Coordinator active, Touch Bar input via local MT shim |
-| 6.17+          | Coordinator + upstream HID multi-touch quirk          |
-
----
-
 ## NOTE
 
 The touchbar driver was refactored in late 2018; if you're upgrading from the `appletb` driver, please see the [Upgrading](#upgrading) section.
@@ -143,6 +133,18 @@ echo 1 | sudo tee /sys/kernel/debug/tracing/events/applespi/applespi_keyboard_da
 
 ALS / Touchpad logging available under `/sys/kernel/debug/applespi/`.
 
+---
+##Authors & Contributors
+
+This project has been maintained and extended by several people over the years:
+
+cb22 — started the original macbook12-spi-driver project to support Apple SPI keyboard and trackpad on early MacBooks.
+
+roadrunner2 (Ronald Tschalär) — significantly expanded the driver, refactored Touch Bar/ALS support into proper iBridge subdrivers, and upstreamed the SPI keyboard driver (merged in Linux 5.3).
+
+marc-git — maintained the repo afterwards, provided DKMS packaging, and kept the driver usable for later kernels.
+
+F13-Kr1pt0n — forked the project as an MBP14,3 owner, updating the iBridge and Touch Bar stack for Linux 6.15+ compatibility (mode coordinator, HID MT shim, blacklist handling) while preserving backward compatibility with older kernels.
 ---
 
 ## License
