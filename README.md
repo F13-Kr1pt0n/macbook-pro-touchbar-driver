@@ -74,7 +74,7 @@ Exposes the ambient light sensor; works automatically with `iio-sensor-proxy`.
 sudo pacman -S dkms linux-headers   # Arch
 # or: sudo apt install dkms build-essential linux-headers-$(uname -r)
 
-git clone https://github.com/<your-username>/macbook12-spi-driver.git
+git clone https://github.com/F13-Kr1pt0n/macbook-pro-touchbar-driver
 cd macbook12-spi-driver
 sudo mkdir -p /usr/src/appleibridge-0.1
 sudo cp -r . /usr/src/appleibridge-0.1
