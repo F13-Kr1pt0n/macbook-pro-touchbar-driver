@@ -150,10 +150,12 @@ static bool appleib_cfg_is_keyboard(const struct usb_host_config *cfg)
 	int i;
 	for (i = 0; i < cfg->desc.bNumInterfaces; i++) {
 		const struct usb_interface_descriptor *ifd;
-		if (!cfg->intf_cache[i] || !cfg->intf_cache[i]->altsetting)
-			continue;
-		ifd = &cfg->intf_cache[i]->altsetting[0].desc;
-		if (ifd->bInterfaceClass == USB_CLASS_HID)
+		/* MBP14,3: validate interface cache has at least one altsetting */
+                if (!cfg->intf_cache[i] || cfg->intf_cache[i]->num_altsetting < 1)
+                    continue;
+                ifd = &cfg->intf_cache[i]->altsetting[0].desc;
+                if (ifd->bInterfaceClass == USB_CLASS_HID)
+
 			return true;
 	}
 	return false;
@@ -164,16 +166,17 @@ static bool appleib_cfg_is_display(const struct usb_host_config *cfg)
 	int i;
 	for (i = 0; i < cfg->desc.bNumInterfaces; i++) {
 		const struct usb_interface_descriptor *ifd;
-		if (!cfg->intf_cache[i] || !cfg->intf_cache[i]->altsetting)
-			continue;
-		ifd = &cfg->intf_cache[i]->altsetting[0].desc;
-		if (ifd->bInterfaceClass == USB_CLASS_VENDOR_SPEC)
+		/* MBP14,3: validate interface cache has at least one altsetting */
+                if (!cfg->intf_cache[i] || cfg->intf_cache[i]->num_altsetting < 1)
+                    continue;
+                ifd = &cfg->intf_cache[i]->altsetting[0].desc;
+                if (ifd->bInterfaceClass == USB_CLASS_VENDOR_SPEC)
 			return true;
 	}
 	return false;
 }
 
-static int appleib_find_config_values(struct usb_device *udev, int *kbd_cv, int *disp_cv)
+static int __maybe_unused appleib_find_config_values(struct usb_device *udev, int *kbd_cv, int *disp_cv)
 {
 	int c;
 
@@ -252,19 +255,7 @@ out_unlock:
 }
 EXPORT_SYMBOL_GPL(apple_ib_set_tb_mode);
 
-static int __init appleib_tbmode_init(void)
-{
-	apple_tb_mode = appleib_parse_tb_mode_param();
-	apple_ib_prefer_binding = prefer_apple_ib;
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(6,15,0)
-	pr_info("apple-ibridge: MBP14,3 coordinator active (tb_mode=%s, prefer_apple_ib=%d)\n",
-		tb_mode_param ? tb_mode_param : "auto", prefer_apple_ib);
-#else
-	pr_info("apple-ibridge: legacy kernel; TB mode coordinator is a no-op\n");
-#endif
-	return 0;
-}
-module_init(appleib_tbmode_init);
+
 
 
 
@@ -965,6 +956,12 @@ static int appleib_probe(struct acpi_device *acpi)
 	struct appleib_device *ib_dev;
 	int i;
 	int ret;
+	  /* MBP14,3: parse params at probe; avoid extra module_init */
+        apple_tb_mode = appleib_parse_tb_mode_param();
+        apple_ib_prefer_binding = prefer_apple_ib;
+        #if LINUX_VERSION_CODE >= KERNEL_VERSION(6,15,0)
+               dev_info(&acpi->dev, "MBP14,3 TB coordinator: tb_mode=%s prefer_apple_ib=%d\n", tb_mode_param ? tb_mode_param : "auto", prefer_apple_ib);
+        #endif
 
 	ib_dev = appleib_alloc_device(acpi);
 	if (IS_ERR_OR_NULL(ib_dev))
