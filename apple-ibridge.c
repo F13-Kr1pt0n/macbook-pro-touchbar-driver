@@ -54,6 +54,8 @@
 #include <linux/srcu.h>
 #include <linux/usb.h>
 #include <linux/version.h>
+#include <linux/delay.h>
+#include <linux/string.h>
 
 #include <asm/barrier.h>
 
@@ -111,6 +113,161 @@ struct appleib_hid_dev_info {
 	const struct hid_device_id	*device_id;
 	bool				started;
 };
+/* ======================================================================= */
+/* MBP14,3: Touch Bar mode coordinator (6.15+)                              */
+/* - tb_mode=auto|keyboard|display  (default: auto)                         */
+/* - prefer_apple_ib=Y to prefer out-of-tree over upstream HID/DRM          */
+/* ======================================================================= */
+
+enum tb_mode apple_tb_mode = TB_MODE_AUTO;
+bool apple_ib_prefer_binding = true;
+
+static char *tb_mode_param = "auto";
+module_param(tb_mode_param, charp, 0644);
+MODULE_PARM_DESC(tb_mode_param,
+	"Touch Bar mode: auto|keyboard|display (default: auto) — MBP14,3");
+
+static bool prefer_apple_ib = true;
+module_param(prefer_apple_ib, bool, 0644);
+MODULE_PARM_DESC(prefer_apple_ib,
+	"Prefer apple_ib* over upstream hid-appletb-* and appletbdrm (default: Y) — MBP14,3");
+
+static enum tb_mode appleib_parse_tb_mode_param(void)
+{
+	if (!tb_mode_param)
+		return TB_MODE_AUTO;
+	if (!strcmp(tb_mode_param, "keyboard"))
+		return TB_MODE_KEYBOARD;
+	if (!strcmp(tb_mode_param, "display"))
+		return TB_MODE_DISPLAY;
+	return TB_MODE_AUTO;
+}
+
+static DEFINE_MUTEX(appleib_tbmode_lock);
+
+static bool appleib_cfg_is_keyboard(const struct usb_host_config *cfg)
+{
+	int i;
+	for (i = 0; i < cfg->desc.bNumInterfaces; i++) {
+		const struct usb_interface_descriptor *ifd;
+		if (!cfg->intf_cache[i] || !cfg->intf_cache[i]->altsetting)
+			continue;
+		ifd = &cfg->intf_cache[i]->altsetting[0].desc;
+		if (ifd->bInterfaceClass == USB_CLASS_HID)
+			return true;
+	}
+	return false;
+}
+
+static bool appleib_cfg_is_display(const struct usb_host_config *cfg)
+{
+	int i;
+	for (i = 0; i < cfg->desc.bNumInterfaces; i++) {
+		const struct usb_interface_descriptor *ifd;
+		if (!cfg->intf_cache[i] || !cfg->intf_cache[i]->altsetting)
+			continue;
+		ifd = &cfg->intf_cache[i]->altsetting[0].desc;
+		if (ifd->bInterfaceClass == USB_CLASS_VENDOR_SPEC)
+			return true;
+	}
+	return false;
+}
+
+static int appleib_find_config_values(struct usb_device *udev, int *kbd_cv, int *disp_cv)
+{
+	int c;
+
+	*kbd_cv = -1;
+	*disp_cv = -1;
+
+	for (c = 0; c < udev->descriptor.bNumConfigurations; c++) {
+		const struct usb_host_config *cfg = &udev->config[c];
+		if (!cfg)
+			continue;
+
+		if (*kbd_cv < 0 && appleib_cfg_is_keyboard(cfg))
+			*kbd_cv = cfg->desc.bConfigurationValue;
+
+		if (*disp_cv < 0 && appleib_cfg_is_display(cfg))
+			*disp_cv = cfg->desc.bConfigurationValue;
+	}
+	return (*kbd_cv >= 0 || *disp_cv >= 0) ? 0 : -ENODEV;
+}
+
+/* Switch Touch Bar configuration. No-op on < 6.15 */
+int apple_ib_set_tb_mode(struct usb_device *udev, enum tb_mode mode)
+{
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6,15,0)
+	int ret, kcv = -1, dcv = -1, target_cv = -1;
+
+	if (!udev)
+		return -ENODEV;
+
+	mutex_lock(&appleib_tbmode_lock);
+
+	if (mode == TB_MODE_AUTO)
+		mode = appleib_parse_tb_mode_param();
+
+	ret = appleib_find_config_values(udev, &kcv, &dcv);
+	if (ret) {
+		dev_warn(&udev->dev, "MBP14,3: no recognizable TB configs\n");
+		goto out_unlock;
+	}
+
+	switch (mode) {
+	case TB_MODE_KEYBOARD: target_cv = (kcv >= 0) ? kcv : dcv; break;
+	case TB_MODE_DISPLAY:  target_cv = (dcv >= 0) ? dcv : kcv; break;
+	default /* AUTO */:    target_cv = (dcv >= 0) ? dcv : kcv; break;
+	}
+
+	if (target_cv < 0) {
+		dev_warn(&udev->dev, "MBP14,3: desired TB mode not present; leaving as-is\n");
+		ret = -ENODEV;
+		goto out_unlock;
+	}
+
+	if (udev->actconfig && udev->actconfig->desc.bConfigurationValue == target_cv) {
+		dev_info(&udev->dev, "MBP14,3: Touch Bar already in requested mode (cfg=%d)\n",
+			 target_cv);
+		ret = 0;
+		goto out_unlock;
+	}
+
+	dev_info(&udev->dev, "MBP14,3: switching Touch Bar to cfg=%d (%s)\n",
+		 target_cv, (target_cv == dcv) ? "display" : "keyboard");
+
+	ret = usb_set_configuration(udev, target_cv);
+	if (ret)
+		dev_err(&udev->dev, "MBP14,3: usb_set_configuration(%d) failed: %d\n",
+			target_cv, ret);
+	else
+		msleep(150); /* let udev settle */
+
+out_unlock:
+	mutex_unlock(&appleib_tbmode_lock);
+	return ret;
+#else
+	return 0;
+#endif
+}
+EXPORT_SYMBOL_GPL(apple_ib_set_tb_mode);
+
+static int __init appleib_tbmode_init(void)
+{
+	apple_tb_mode = appleib_parse_tb_mode_param();
+	apple_ib_prefer_binding = prefer_apple_ib;
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6,15,0)
+	pr_info("apple-ibridge: MBP14,3 coordinator active (tb_mode=%s, prefer_apple_ib=%d)\n",
+		tb_mode_param ? tb_mode_param : "auto", prefer_apple_ib);
+#else
+	pr_info("apple-ibridge: legacy kernel; TB mode coordinator is a no-op\n");
+#endif
+	return 0;
+}
+module_init(appleib_tbmode_init);
+
+
+
 
 static void appleib_remove_driver(struct appleib_device *ib_dev,
 				  struct appleib_hid_drv_info *drv_info,
@@ -189,7 +346,7 @@ static void appleib_remove_device(struct appleib_device *ib_dev,
 	kfree(dev_info);
 }
 
-void appleib_detach_and_free_hid_driver(struct appleib_device *ib_dev,
+static void appleib_detach_and_free_hid_driver(struct appleib_device *ib_dev,
 					struct appleib_hid_drv_info *drv_info)
 {
 	appleib_detach_devices(ib_dev, drv_info->driver);
@@ -422,7 +579,7 @@ static int appleib_hid_event(struct hid_device *hdev, struct hid_field *field,
 	return appleib_forward_int_op(hdev, appleib_hid_event_fwd, &args);
 }
 
-static __u8 *appleib_report_fixup(struct hid_device *hdev, __u8 *rdesc,
+static const __u8 *appleib_report_fixup(struct hid_device *hdev, __u8 *rdesc,
 				  unsigned int *rsize)
 {
 	/* Some fields have a size of 64 bits, which according to HID 1.11
@@ -657,6 +814,7 @@ appleib_add_device(struct appleib_device *ib_dev, struct hid_device *hdev,
 	return dev_info;
 }
 
+/* MBP14,3: choose Touch Bar USB configuration correctly on >= 6.15 */
 static int appleib_hid_probe(struct hid_device *hdev,
 			     const struct hid_device_id *id)
 {
@@ -665,13 +823,22 @@ static int appleib_hid_probe(struct hid_device *hdev,
 	struct usb_device *udev;
 	int rc;
 
-	/* check and set usb config first */
+	/* Always get the parent USB device first */
 	udev = hid_to_usb_dev(hdev);
 
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6,15,0)
+	/* On new kernels: switch according to tb_mode (AUTO prefers display). */
+	rc = apple_ib_set_tb_mode(udev, apple_tb_mode);
+	if (rc && rc != -ENODEV)
+		dev_warn(&hdev->dev, "MBP14,3: tb_mode switch returned %d; continuing\n", rc);
+#else
+	/* Legacy kernels: enforce the historical 'basic' (keyboard) config. */
 	if (udev->actconfig->desc.bConfigurationValue != APPLETB_BASIC_CONFIG) {
+		/* Keep your original call for older kernels */
 		rc = usb_driver_set_configuration(udev, APPLETB_BASIC_CONFIG);
 		return rc ? rc : -ENODEV;
 	}
+#endif
 
 	ib_dev = (void *)id->driver_data;
 	hid_set_drvdata(hdev, ib_dev);
@@ -710,6 +877,7 @@ stop_hw:
 error:
 	return rc;
 }
+
 
 static void appleib_hid_remove(struct hid_device *hdev)
 {
@@ -898,7 +1066,6 @@ MODULE_DEVICE_TABLE(acpi, appleib_acpi_match);
 static struct acpi_driver appleib_driver = {
 	.name		= "apple-ibridge",
 	.class		= "topcase", /* ? */
-	.owner		= THIS_MODULE,
 	.ids		= appleib_acpi_match,
 	.ops		= {
 		.add		= appleib_probe,
