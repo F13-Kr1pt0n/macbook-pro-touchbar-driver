@@ -134,7 +134,8 @@ echo 1 | sudo tee /sys/kernel/debug/tracing/events/applespi/applespi_keyboard_da
 ALS / Touchpad logging available under `/sys/kernel/debug/applespi/`.
 
 ---
-##Authors & Contributors
+
+## Authors & Contributors
 
 This project has been maintained and extended by several people over the years:
 
