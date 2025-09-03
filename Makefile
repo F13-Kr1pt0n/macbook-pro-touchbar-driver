@@ -1,9 +1,6 @@
-obj-m += applespi.o
 obj-m += apple-ibridge.o
 obj-m += apple-ib-tb.o
 obj-m += apple-ib-als.o
-
-CFLAGS_applespi.o = -I$(src)	# for tracing
 
 KVERSION := $(KERNELRELEASE)
 ifeq ($(origin KERNELRELEASE), undefined)
@@ -20,8 +17,3 @@ clean:
 
 install:
 	$(MAKE) -C $(KDIR) M=$(PWD) modules_install
-
-test: all
-	sync
-	-rmmod applespi
-	insmod ./applespi.ko
