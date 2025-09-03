@@ -39,8 +39,8 @@
 #include <linux/usb/ch9.h>
 #include <linux/usb.h>
 #include <linux/workqueue.h>
-#include <linux/version.h>     /* LINUX_VERSION_CODE guards */
-/* MBP14,3: MT backport helpers */
+#include <linux/version.h>   
+#include <linux/usb/input.h>
 #include <linux/input/mt.h>
 
 #include "apple-ibridge.h"
@@ -168,7 +168,7 @@ struct appletb_device {
 	int			idle_timeout;
 	bool			dim_to_is_calc;
 	int			fn_mode;
-    int             fn_mode;
+
 	#if LINUX_VERSION_CODE >= KERNEL_VERSION(6,15,0)
 	/* MBP14,3: input device that will emit MT touches in display mode */
 	struct tb_touch       touch;
@@ -208,7 +208,7 @@ struct tb_touch {
 	bool mt_inited;
 };
 
-static int tb_input_init(struct usb_interface *intf, struct tb_touch *tb)
+static int __maybe_unused tb_input_init(struct usb_interface *intf, struct tb_touch *tb)
 {
 	int rc;
 	tb->input = devm_input_allocate_device(&intf->dev);
@@ -234,7 +234,7 @@ static int tb_input_init(struct usb_interface *intf, struct tb_touch *tb)
 /* Call this from your interrupt-IN URB completion that carries touch data.
  * Report assumption: [id][x_lo][x_hi][y_lo][y_hi]...
  */
-static void tb_handle_touch_report(struct tb_touch *tb, const u8 *buf, size_t len)
+static void __maybe_unused tb_handle_touch_report(struct tb_touch *tb, const u8 *buf, size_t len)
 {
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(6,15,0)
 	if (tb->mt_inited && len >= 5) {
