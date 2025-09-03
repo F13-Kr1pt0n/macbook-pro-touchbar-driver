@@ -39,6 +39,9 @@
 #include <linux/usb/ch9.h>
 #include <linux/usb.h>
 #include <linux/workqueue.h>
+#include <linux/version.h>     /* LINUX_VERSION_CODE guards */
+/* MBP14,3: MT backport helpers */
+#include <linux/input/mt.h>
 
 #include "apple-ibridge.h"
 
@@ -165,6 +168,12 @@ struct appletb_device {
 	int			idle_timeout;
 	bool			dim_to_is_calc;
 	int			fn_mode;
+    int             fn_mode;
+	#if LINUX_VERSION_CODE >= KERNEL_VERSION(6,15,0)
+	/* MBP14,3: input device that will emit MT touches in display mode */
+	struct tb_touch       touch;
+	#endif
+
 };
 
 struct appletb_key_translation {
@@ -188,6 +197,58 @@ static const struct appletb_key_translation appletb_fn_codes[] = {
 };
 
 static struct hid_driver appletb_hid_driver;
+
+
+
+/* MBP14,3: minimal MT input backport for Touch Bar 'display' mode (6.15–6.16).
+ * For 6.17+ upstream HID adds proper MT parsing; this shim remains harmless.
+ */
+struct tb_touch {
+	struct input_dev *input;
+	bool mt_inited;
+};
+
+static int tb_input_init(struct usb_interface *intf, struct tb_touch *tb)
+{
+	int rc;
+	tb->input = devm_input_allocate_device(&intf->dev);
+	if (!tb->input)
+		return -ENOMEM;
+
+	tb->input->name = "Apple Touch Bar (MBP14,3)";
+	tb->input->phys = "usb/input0";
+	usb_to_input_id(interface_to_usbdev(intf), &tb->input->id);
+	input_set_drvdata(tb->input, tb);
+
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6,15,0)
+	input_mt_init_slots(tb->input, 10, INPUT_MT_DIRECT);
+	/* Conservative axis ranges; refine if you know exact report scale */
+	input_set_abs_params(tb->input, ABS_MT_POSITION_X, 0, 2170, 0, 0);
+	input_set_abs_params(tb->input, ABS_MT_POSITION_Y, 0, 60,   0, 0);
+	tb->mt_inited = true;
+#endif
+	rc = input_register_device(tb->input);
+	return rc;
+}
+
+/* Call this from your interrupt-IN URB completion that carries touch data.
+ * Report assumption: [id][x_lo][x_hi][y_lo][y_hi]...
+ */
+static void tb_handle_touch_report(struct tb_touch *tb, const u8 *buf, size_t len)
+{
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6,15,0)
+	if (tb->mt_inited && len >= 5) {
+		u16 x = buf[1] | (buf[2] << 8);
+		u16 y = buf[3] | (buf[4] << 8);
+		input_mt_slot(tb->input, 0);
+		input_mt_report_slot_state(tb->input, MT_TOOL_FINGER, true);
+		input_event(tb->input, EV_ABS, ABS_MT_POSITION_X, x);
+		input_event(tb->input, EV_ABS, ABS_MT_POSITION_Y, y);
+		input_mt_sync_frame(tb->input);
+		input_sync(tb->input);
+	}
+#endif
+}
 
 static int appletb_send_hid_report(struct appletb_report_info *rinfo,
 				   __u8 requesttype, void *data, __u16 size)
@@ -953,6 +1014,8 @@ static int appletb_fill_report_info(struct appletb_device *tb_dev,
 		report_info->report_type = 0x02; break;
 	case HID_FEATURE_REPORT:
 		report_info->report_type = 0x03; break;
+	default:
+		break;
 	}
 
 	return 1;
@@ -1027,6 +1090,27 @@ static int appletb_probe(struct hid_device *hdev,
 		tb_dev->cur_tb_disp = APPLETB_CMD_DISP_OFF;
 
 		appletb_update_touchbar(tb_dev, false);
+		#if LINUX_VERSION_CODE >= KERNEL_VERSION(6,15,0)
+		/* MBP14,3: set up an input device for display-mode touches.
+		* NOTE: This only allocates/registers the input device. You still need to
+		*       feed touch samples into it (see tb_handle_touch_report()).
+		*/
+		{
+			struct usb_interface *intf;
+			int rc_mt;
+
+			intf = appletb_get_usb_iface(tb_dev->disp_info.hdev);
+			if (intf) {
+				rc_mt = tb_input_init(intf, &tb_dev->touch);
+				if (rc_mt)
+					dev_warn(tb_dev->log_dev,
+							"MT: input init failed: %d (display mode)\n", rc_mt);
+			} else {
+				dev_warn(tb_dev->log_dev,
+						"MT: no USB interface for display HID; skipping MT init\n");
+			}
+		}
+		#endif
 
 		/* set up the input handler */
 		tb_dev->inp_handler.event = appletb_inp_event;
@@ -1259,7 +1343,7 @@ error:
 	return rc;
 }
 
-static int appletb_platform_remove(struct platform_device *pdev)
+static void appletb_platform_remove(struct platform_device *pdev)
 {
 	struct appleib_device_data *ddata = pdev->dev.platform_data;
 	struct appleib_device *ib_dev = ddata->ib_dev;
@@ -1268,14 +1352,9 @@ static int appletb_platform_remove(struct platform_device *pdev)
 
 	rc = appleib_unregister_hid_driver(ib_dev, &appletb_hid_driver);
 	if (rc)
-		goto error;
+		return;
 
 	appletb_free_device(tb_dev);
-
-	return 0;
-
-error:
-	return rc;
 }
 
 static const struct platform_device_id appletb_platform_ids[] = {
@@ -1283,6 +1362,7 @@ static const struct platform_device_id appletb_platform_ids[] = {
 	{ }
 };
 MODULE_DEVICE_TABLE(platform, appletb_platform_ids);
+MODULE_SOFTDEP("pre: hid-appletb_kbd hid-appletb_bl appletbdrm");
 
 static struct platform_driver appletb_platform_driver = {
 	.id_table = appletb_platform_ids,
