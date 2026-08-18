@@ -131,6 +131,19 @@ static const struct attribute_group appletb_attr_group = {
 	.attrs = appletb_attrs,
 };
 
+/* struct tb_touch is embedded BY VALUE in struct appletb_device below, so it must be
+ * defined before it. It was previously defined ~30 lines further down, which made the
+ * LINUX_VERSION_CODE >= 6.15 path fail to build:
+ *   apple-ib-tb.c:174:31: error: field 'touch' has incomplete type
+ * Definition moved here unchanged.
+ */
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6,15,0)
+struct tb_touch {
+	struct input_dev *input;
+	bool mt_inited;
+};
+#endif
+
 struct appletb_device {
 	bool			active;
 	struct device		*log_dev;
@@ -203,10 +216,7 @@ static struct hid_driver appletb_hid_driver;
 /* MBP14,3: minimal MT input backport for Touch Bar 'display' mode (6.15–6.16).
  * For 6.17+ upstream HID adds proper MT parsing; this shim remains harmless.
  */
-struct tb_touch {
-	struct input_dev *input;
-	bool mt_inited;
-};
+/* struct tb_touch is now defined above struct appletb_device, which embeds it. */
 
 static int __maybe_unused tb_input_init(struct usb_interface *intf, struct tb_touch *tb)
 {

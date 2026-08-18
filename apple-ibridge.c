@@ -145,6 +145,11 @@ static enum tb_mode appleib_parse_tb_mode_param(void)
 
 static DEFINE_MUTEX(appleib_tbmode_lock);
 
+/* Guards against re-entering apple_ib_set_tb_mode(). Protected by appleib_tbmode_lock.
+ * See the comment in that function.
+ */
+static bool appleib_tbmode_switching;
+
 static bool appleib_cfg_is_keyboard(const struct usb_host_config *cfg)
 {
 	int i;
@@ -208,6 +213,28 @@ int apple_ib_set_tb_mode(struct usb_device *udev, enum tb_mode mode)
 
 	mutex_lock(&appleib_tbmode_lock);
 
+	/* usb_set_configuration() below tears down the current USB
+	 * configuration and instantiates the new one, which unbinds and re-binds every
+	 * interface driver SYNCHRONOUSLY, in this same task. That re-invokes
+	 * appleib_hid_probe(), which calls this function again — and upstream then takes
+	 * appleib_tbmode_lock a second time from the task that already holds it:
+	 *
+	 *   INFO: task modprobe:24033 blocked for more than 983 seconds.
+	 *   INFO: task modprobe:24033 is blocked on a mutex likely owned by
+	 *         task modprobe:24033.
+	 *
+	 * The wedged task is unkillable (D state), hangs sysinit.target so the login
+	 * screen never appears, and blocks shutdown, requiring a forced power-off.
+	 *
+	 * Two changes fix it: this re-entrancy guard, and dropping the lock around
+	 * usb_set_configuration() further down so the recursive call can reach the guard
+	 * instead of blocking on the mutex.
+	 */
+	if (appleib_tbmode_switching) {
+		mutex_unlock(&appleib_tbmode_lock);
+		return 0;
+	}
+
 	if (mode == TB_MODE_AUTO)
 		mode = appleib_parse_tb_mode_param();
 
@@ -239,12 +266,21 @@ int apple_ib_set_tb_mode(struct usb_device *udev, enum tb_mode mode)
 	dev_info(&udev->dev, "MBP14,3: switching Touch Bar to cfg=%d (%s)\n",
 		 target_cv, (target_cv == dcv) ? "display" : "keyboard");
 
+	/* Must not hold appleib_tbmode_lock across this call: it invokes probe/remove
+	 * callbacks in this task, which re-enter this function.
+	 */
+	appleib_tbmode_switching = true;
+	mutex_unlock(&appleib_tbmode_lock);
+
 	ret = usb_set_configuration(udev, target_cv);
 	if (ret)
 		dev_err(&udev->dev, "MBP14,3: usb_set_configuration(%d) failed: %d\n",
 			target_cv, ret);
 	else
 		msleep(150); /* let udev settle */
+
+	mutex_lock(&appleib_tbmode_lock);
+	appleib_tbmode_switching = false;
 
 out_unlock:
 	mutex_unlock(&appleib_tbmode_lock);
