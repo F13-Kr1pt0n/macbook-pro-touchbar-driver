@@ -1357,6 +1357,17 @@ static void appletb_platform_remove(struct platform_device *pdev)
 	appletb_free_device(tb_dev);
 }
 
+#if LINUX_VERSION_CODE < KERNEL_VERSION(6,11,0)
+static int appletb_platform_remove_compat(struct platform_device *pdev)
+{
+	appletb_platform_remove(pdev);
+	return 0;
+}
+#define APPLETB_PLATFORM_REMOVE appletb_platform_remove_compat
+#else
+#define APPLETB_PLATFORM_REMOVE appletb_platform_remove
+#endif
+
 static const struct platform_device_id appletb_platform_ids[] = {
 	{ .name = PLAT_NAME_IB_TB },
 	{ }
@@ -1370,7 +1381,7 @@ static struct platform_driver appletb_platform_driver = {
 		.name	= "apple-ib-tb",
 	},
 	.probe = appletb_platform_probe,
-	.remove = appletb_platform_remove,
+	.remove = APPLETB_PLATFORM_REMOVE,
 };
 
 module_platform_driver(appletb_platform_driver);

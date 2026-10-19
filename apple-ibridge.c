@@ -570,7 +570,11 @@ static int appleib_hid_event(struct hid_device *hdev, struct hid_field *field,
 	return appleib_forward_int_op(hdev, appleib_hid_event_fwd, &args);
 }
 
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6,12,0)
 static const __u8 *appleib_report_fixup(struct hid_device *hdev, __u8 *rdesc,
+#else
+static __u8 *appleib_report_fixup(struct hid_device *hdev, __u8 *rdesc,
+#endif
 				  unsigned int *rsize)
 {
 	/* Some fields have a size of 64 bits, which according to HID 1.11

@@ -659,6 +659,17 @@ static void appleals_platform_remove(struct platform_device *pdev)
 	kfree(als_dev);
 }
 
+#if LINUX_VERSION_CODE < KERNEL_VERSION(6,11,0)
+static int appleals_platform_remove_compat(struct platform_device *pdev)
+{
+	appleals_platform_remove(pdev);
+	return 0;
+}
+#define APPLEALS_PLATFORM_REMOVE appleals_platform_remove_compat
+#else
+#define APPLEALS_PLATFORM_REMOVE appleals_platform_remove
+#endif
+
 static const struct platform_device_id appleals_platform_ids[] = {
 	{ .name = PLAT_NAME_IB_ALS },
 	{ }
@@ -671,7 +682,7 @@ static struct platform_driver appleals_platform_driver = {
 		.name	= "apple-ib-als",
 	},
 	.probe = appleals_platform_probe,
-	.remove = appleals_platform_remove,
+	.remove = APPLEALS_PLATFORM_REMOVE,
 };
 
 module_platform_driver(appleals_platform_driver);
