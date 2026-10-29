@@ -131,6 +131,11 @@ static const struct attribute_group appletb_attr_group = {
 	.attrs = appletb_attrs,
 };
 
+struct tb_touch {
+	struct input_dev *input;
+	bool mt_inited;
+};
+
 struct appletb_device {
 	bool			active;
 	struct device		*log_dev;
@@ -159,7 +164,6 @@ struct appletb_device {
 	unsigned char		cur_tb_disp;
 	unsigned char		pnd_tb_disp;
 	bool			tb_autopm_off;
-	bool			restore_autopm;
 	struct delayed_work	tb_work;
 	/* protects most of the above */
 	spinlock_t		tb_lock;
@@ -203,10 +207,6 @@ static struct hid_driver appletb_hid_driver;
 /* MBP14,3: minimal MT input backport for Touch Bar 'display' mode (6.15–6.16).
  * For 6.17+ upstream HID adds proper MT parsing; this shim remains harmless.
  */
-struct tb_touch {
-	struct input_dev *input;
-	bool mt_inited;
-};
 
 static int __maybe_unused tb_input_init(struct usb_interface *intf, struct tb_touch *tb)
 {
@@ -329,10 +329,10 @@ static int appletb_set_tb_disp(struct appletb_device *tb_dev,
 
 	/*
 	 * Keep the USB interface powered on while the touch bar display is on
-	 * for better responsiveness.
+	 * for better responsiveness. tb_autopm_off says whether we hold that
+	 * reference: cur_tb_disp is set to off at suspend without dropping it.
 	 */
-	if (disp != APPLETB_CMD_DISP_OFF &&
-	    tb_dev->cur_tb_disp == APPLETB_CMD_DISP_OFF)
+	if (disp != APPLETB_CMD_DISP_OFF && !tb_dev->tb_autopm_off)
 		tb_dev->tb_autopm_off =
 			appletb_disable_autopm(&tb_dev->disp_info);
 
@@ -348,12 +348,9 @@ static int appletb_set_tb_disp(struct appletb_device *tb_dev,
 			"Failed to set touch bar display to %u (%d)\n", disp,
 			rc);
 
-	if (disp == APPLETB_CMD_DISP_OFF &&
-	    tb_dev->cur_tb_disp != APPLETB_CMD_DISP_OFF) {
-		if (tb_dev->tb_autopm_off) {
-			usb_autopm_put_interface(tb_dev->disp_info.usb_iface);
-			tb_dev->tb_autopm_off = false;
-		}
+	if (disp == APPLETB_CMD_DISP_OFF && tb_dev->tb_autopm_off) {
+		usb_autopm_put_interface(tb_dev->disp_info.usb_iface);
+		tb_dev->tb_autopm_off = false;
 	}
 
 	return rc;
@@ -384,7 +381,6 @@ static void appletb_set_tb_worker(struct work_struct *work)
 	unsigned char pending_mode;
 	unsigned char pending_disp;
 	unsigned char current_disp;
-	bool restore_autopm;
 	bool any_tb_key_pressed, need_reschedule;
 	int rc1 = 1, rc2 = 1;
 	unsigned long flags;
@@ -394,7 +390,6 @@ static void appletb_set_tb_worker(struct work_struct *work)
 	/* handle explicit mode-change request */
 	pending_mode = tb_dev->pnd_tb_mode;
 	pending_disp = tb_dev->pnd_tb_disp;
-	restore_autopm = tb_dev->restore_autopm;
 
 	spin_unlock_irqrestore(&tb_dev->tb_lock, flags);
 
@@ -405,9 +400,6 @@ static void appletb_set_tb_worker(struct work_struct *work)
 		msleep(25);
 	if (pending_disp != APPLETB_CMD_DISP_NONE)
 		rc2 = appletb_set_tb_disp(tb_dev, pending_disp);
-
-	if (restore_autopm && tb_dev->tb_autopm_off)
-		appletb_disable_autopm(&tb_dev->disp_info);
 
 	spin_lock_irqsave(&tb_dev->tb_lock, flags);
 
@@ -431,8 +423,6 @@ static void appletb_set_tb_worker(struct work_struct *work)
 			need_reschedule = true;
 	}
 	current_disp = tb_dev->cur_tb_disp;
-
-	tb_dev->restore_autopm = false;
 
 	/* calculate time left to next timeout */
 	if (tb_dev->idle_timeout == -2 || tb_dev->idle_timeout == 0)
@@ -1094,20 +1084,22 @@ static int appletb_probe(struct hid_device *hdev,
 		/* MBP14,3: set up an input device for display-mode touches.
 		* NOTE: This only allocates/registers the input device. You still need to
 		*       feed touch samples into it (see tb_handle_touch_report()).
+		* Not in the keyboard configuration (1): there it would only be a
+		* touchscreen that never reports anything.
 		*/
 		{
 			struct usb_interface *intf;
 			int rc_mt;
 
 			intf = appletb_get_usb_iface(tb_dev->disp_info.hdev);
-			if (intf) {
+			if (!intf) {
+				dev_warn(tb_dev->log_dev,
+						"MT: no USB interface for display HID; skipping MT init\n");
+			} else if (interface_to_usbdev(intf)->actconfig->desc.bConfigurationValue != 1) {
 				rc_mt = tb_input_init(intf, &tb_dev->touch);
 				if (rc_mt)
 					dev_warn(tb_dev->log_dev,
 							"MT: input init failed: %d (display mode)\n", rc_mt);
-			} else {
-				dev_warn(tb_dev->log_dev,
-						"MT: no USB interface for display HID; skipping MT init\n");
 			}
 		}
 		#endif
@@ -1175,8 +1167,10 @@ static void appletb_remove(struct hid_device *hdev)
 		appletb_set_tb_mode(tb_dev, APPLETB_CMD_MODE_OFF);
 		appletb_set_tb_disp(tb_dev, APPLETB_CMD_DISP_ON);
 
-		if (tb_dev->tb_autopm_off)
+		if (tb_dev->tb_autopm_off) {
 			usb_autopm_put_interface(tb_dev->disp_info.usb_iface);
+			tb_dev->tb_autopm_off = false;
+		}
 
 		appletb_mark_active(tb_dev, false);
 
@@ -1270,7 +1264,6 @@ static int appletb_reset_resume(struct hid_device *hdev)
 	if ((tb_dev->mode_info.hdev && !tb_dev->mode_info.suspended) &&
 	    (tb_dev->disp_info.hdev && !tb_dev->disp_info.suspended)) {
 		tb_dev->active = true;
-		tb_dev->restore_autopm = true;
 		tb_dev->last_event_time = ktime_get();
 
 		appletb_update_touchbar_no_lock(tb_dev, true);
@@ -1281,6 +1274,31 @@ static int appletb_reset_resume(struct hid_device *hdev)
 	spin_unlock_irqrestore(&tb_dev->tb_lock, flags);
 
 	return 0;
+}
+
+/*
+ * After s2idle the T1 keeps its power and USB calls resume instead of
+ * reset_resume, but appletb_suspend() turned the bar off either way. resume
+ * also follows every runtime autosuspend, which appletb_suspend() ignores:
+ * only act on interfaces it marked suspended.
+ */
+static int appletb_resume(struct hid_device *hdev)
+{
+	struct appletb_device *tb_dev =
+		appleib_get_drvdata(hid_get_drvdata(hdev), &appletb_hid_driver);
+	struct appletb_report_info *rinfo;
+	unsigned long flags;
+	bool suspended;
+
+	spin_lock_irqsave(&tb_dev->tb_lock, flags);
+	rinfo = appletb_get_report_info(tb_dev, hdev);
+	suspended = rinfo && rinfo->suspended;
+	spin_unlock_irqrestore(&tb_dev->tb_lock, flags);
+
+	if (!suspended)
+		return 0;
+
+	return appletb_reset_resume(hdev);
 }
 #endif
 
@@ -1315,6 +1333,7 @@ static struct hid_driver appletb_hid_driver = {
 	.input_configured = appletb_input_configured,
 #ifdef CONFIG_PM
 	.suspend = appletb_suspend,
+	.resume = appletb_resume,
 	.reset_resume = appletb_reset_resume,
 #endif
 };

@@ -38,11 +38,23 @@
 #include <linux/platform_device.h>
 #include <linux/slab.h>
 #include <linux/version.h>
+#include <linux/workqueue.h>
 
 #include "apple-ibridge.h"
 
 #define APPLEALS_DYN_SENS		0	/* our dynamic sensitivity */
 #define APPLEALS_DEF_CHANGE_SENS	APPLEALS_DYN_SENS
+
+/*
+ * The T1 never sends illuminance input reports on its own, whatever the
+ * reporting state, so poll it while events are enabled. The reply to the
+ * GET_REPORT arrives through appleals_hid_event(), which pushes the value.
+ * Each poll wakes the T1, so keep the interval well above the USB
+ * autosuspend delay (2 s by default) or it never powers down.
+ */
+static unsigned int appleals_poll_interval = 5000;
+module_param_named(poll_interval, appleals_poll_interval, uint, 0644);
+MODULE_PARM_DESC(poll_interval, "Illuminance poll interval in ms while the buffer is enabled (0 = no polling; enabling takes effect at the next buffer enable)");
 
 struct appleals_device {
 	struct appleib_device	*ib_dev;
@@ -52,8 +64,10 @@ struct appleals_device {
 	struct hid_field	*illum_field;
 	struct iio_dev		*iio_dev;
 	struct iio_trigger	*iio_trig;
+	struct delayed_work	poll_work;
 	int			cur_sensitivity;
 	int			cur_hysteresis;
+	int			last_value;
 	bool			events_enabled;
 };
 
@@ -245,11 +259,51 @@ static int appleals_hid_event(struct hid_device *hdev, struct hid_field *field,
 		return 0;
 
 	if (usage->hid == HID_USAGE_SENSOR_LIGHT_ILLUM) {
-		appleals_push_new_value(als_dev, value);
+		/* polled replies repeat unchanged values; only push changes */
+		if (value != als_dev->last_value) {
+			als_dev->last_value = value;
+			appleals_push_new_value(als_dev, value);
+		}
 		rc = 1;
 	}
 
 	return rc;
+}
+
+/*
+ * Values are pushed from appleals_hid_event(), so the trigger is never polled.
+ * The pollfunc still needs a threaded handler: the IIO core requests its irq
+ * with IRQF_ONESHOT, which genirq warns about without a thread_fn.
+ */
+static irqreturn_t appleals_trigger_handler(int irq, void *p)
+{
+	struct iio_poll_func *pf = p;
+
+	iio_trigger_notify_done(pf->indio_dev->trig);
+
+	return IRQ_HANDLED;
+}
+
+static void appleals_schedule_poll(struct appleals_device *als_dev)
+{
+	unsigned int interval = READ_ONCE(appleals_poll_interval);
+
+	if (interval)
+		queue_delayed_work(system_freezable_wq, &als_dev->poll_work,
+				   msecs_to_jiffies(interval));
+}
+
+static void appleals_poll(struct work_struct *work)
+{
+	struct appleals_device *als_dev =
+		container_of(to_delayed_work(work), struct appleals_device,
+			     poll_work);
+
+	hid_hw_request(als_dev->hid_dev, als_dev->illum_field->report,
+		       HID_REQ_GET_REPORT);
+
+	if (READ_ONCE(als_dev->events_enabled))
+		appleals_schedule_poll(als_dev);
 }
 
 static int appleals_enable_events(struct iio_trigger *trig, bool enable)
@@ -260,12 +314,16 @@ static int appleals_enable_events(struct iio_trigger *trig, bool enable)
 	appleals_set_enum_config(als_dev, HID_USAGE_SENSOR_PROP_REPORT_STATE,
 		enable ? HID_USAGE_SENSOR_PROP_REPORTING_STATE_ALL_EVENTS_ENUM :
 			 HID_USAGE_SENSOR_PROP_REPORTING_STATE_NO_EVENTS_ENUM);
-	als_dev->events_enabled = enable;
+	WRITE_ONCE(als_dev->events_enabled, enable);
 
 	/* if the sensor was enabled, push an initial value */
 	if (enable) {
+		als_dev->last_value = -1;
 		value = appleals_get_field_value(als_dev, als_dev->illum_field);
 		appleals_push_new_value(als_dev, value);
+		appleals_schedule_poll(als_dev);
+	} else {
+		cancel_delayed_work_sync(&als_dev->poll_work);
 	}
 
 	return 0;
@@ -480,7 +538,7 @@ static int appleals_config_iio(struct appleals_device *als_dev)
 	iio_dev->name = "als";
 	iio_dev->modes = INDIO_DIRECT_MODE;
 
-	rc = iio_triggered_buffer_setup(iio_dev, &iio_pollfunc_store_time, NULL,
+	rc = iio_triggered_buffer_setup(iio_dev, NULL, appleals_trigger_handler,
 					NULL);
 	if (rc) {
 		dev_err(als_dev->log_dev,
@@ -572,6 +630,7 @@ static int appleals_probe(struct hid_device *hdev,
 
 	als_dev->cur_hysteresis = APPLEALS_DEF_CHANGE_SENS;
 	als_dev->cur_sensitivity = APPLEALS_DEF_CHANGE_SENS;
+	INIT_DELAYED_WORK(&als_dev->poll_work, appleals_poll);
 	appleals_config_sensor(als_dev, false, als_dev->cur_sensitivity);
 
 	return appleals_config_iio(als_dev);
@@ -584,6 +643,8 @@ static void appleals_remove(struct hid_device *hdev)
 				    &appleals_hid_driver);
 
 	iio_device_unregister(als_dev->iio_dev);
+	WRITE_ONCE(als_dev->events_enabled, false);
+	cancel_delayed_work_sync(&als_dev->poll_work);
 
 	iio_trigger_unregister(als_dev->iio_trig);
 	iio_trigger_free(als_dev->iio_trig);

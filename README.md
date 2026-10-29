@@ -58,7 +58,7 @@ Three modules are provided:
 * Idle/dim/off based on timeouts (`idle_timeout`, `dim_timeout` params).
 * **New in this fork**:
 
-  * `tb_mode` param: `auto|keyboard|display` (default `auto`).
+  * `tb_mode_param`: `auto|keyboard|display` (default `keyboard`; `auto`/`display` pick configuration 2 on the T1).
   * Multi-touch reporting in display mode on 6.15–6.16.
   * `prefer_apple_ib` param to let this fork override upstream drivers.
 
@@ -106,6 +106,37 @@ Enable the Touch Bar reset service:
 sudo cp touchbar-reset.service /etc/systemd/system/
 sudo systemctl enable --now touchbar-reset.service
 ```
+
+### MacBookPro14,2 / T1 (05ac:8600) notes
+
+Tested on a MacBookPro14,2 (13" 2017, four Thunderbolt ports) with Ubuntu 26.04, kernel 7.0.
+
+* **`tb_mode_param` defaults to `keyboard`.** On the T1, `auto`/`display` select configuration 2
+  (vendor-specific, CDC and audio interfaces besides HID); on the MacBookPro14,2 the Touch Bar
+  works in configuration 1.
+* **hid-sensor-hub can take the Touch Bar interface.** The interface with the Touch Bar
+  display control also carries the light sensor. If `hid-sensor-hub` binds it first, the
+  Touch Bar stays dark. Install the udev rule
+  to hand it over (the light sensor keeps working through `apple-ib-als`):
+
+  ```bash
+  sudo cp udev/90-apple-ibridge-t1.rules /etc/udev/rules.d/
+  sudo udevadm control --reload
+  ```
+
+  Check with `ls -l /sys/bus/hid/devices/*05AC:8600*/driver`: every entry should point to
+  `apple-ibridge-hid`.
+* **usbmuxd 1.1.1 switches the T1 off.** Its udev rule (`39-usbmuxd.rules`) sets
+  `bConfigurationValue` to 0 for `05ac:8600`, which removes all T1 interfaces (Touch Bar,
+  light sensor, FaceTime camera). Fixed upstream in usbmuxd commit `61b99ab`
+  ("udev: Make sure iBridge (T1) doesn't end up in an unconfigured state", 2023), but
+  distributions still shipping 1.1.1 lack it. Until then, copy the rule to
+  `/etc/udev/rules.d/39-usbmuxd.rules` and drop `|5ac/8600/*` from the line that sets
+  `bConfigurationValue="0"`.
+* **Light sensor polling.** The T1 does not send illuminance reports by itself, so
+  `apple-ib-als` polls it while it is in use: `poll_interval` (ms, default 5000, 0 = off).
+  Each poll wakes the T1; at intervals below the USB autosuspend delay (2 s by default)
+  it never powers down.
 
 ---
 

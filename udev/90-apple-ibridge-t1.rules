@@ -1,0 +1,8 @@
+# On the T1 (05ac:8600) the HID interface with the Touch Bar display control
+# also carries the ambient light sensor, so hid-sensor-hub (built in or loaded
+# early) can claim it before apple-ibridge registers, and the Touch Bar stays
+# dark. Hand such interfaces to apple-ibridge-hid; apple-ib-als still provides
+# the light sensor. Does nothing when apple_ibridge can't be loaded, and gives
+# up on a device once handing it over failed (so the rebind can't loop).
+ACTION=="add|bind", SUBSYSTEM=="hid", DRIVER=="hid-sensor-hub", ENV{HID_ID}=="0003:000005AC:00008600", \
+	RUN+="/bin/sh -c 'f=/run/apple-ibridge-handover-failed.%k; [ -e $$f ] && exit 0; modprobe apple_ibridge || exit 0; d=/sys/bus/hid/drivers; i=0; while [ ! -d $$d/apple-ibridge-hid ] && [ $$i -lt 50 ]; do sleep 0.1; i=$$((i + 1)); done; [ -d $$d/apple-ibridge-hid ] || exit 0; echo %k > $$d/hid-sensor-hub/unbind || exit 0; echo %k > $$d/apple-ibridge-hid/bind || { : > $$f; echo %k > $$d/hid-sensor-hub/bind; }'"
